@@ -6,16 +6,31 @@ const path = require('path');
 const fs = require('fs');
 const admin = require('firebase-admin');
 
-// 🔐 Firebase Init
-const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+// 🔐 Firebase Init (ENV based)
+let serviceAccount;
+
+try {
+  if (process.env.FIREBASE_KEY) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
+  } else {
+    throw new Error("FIREBASE_KEY not found in ENV");
+  }
+
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+
+  console.log("✅ Firebase initialized successfully");
+
+} catch (err) {
+  console.error("❌ Firebase Init Error:", err.message);
+}
+
 const db = admin.firestore();
 
 const app = express();
 
-// ✅ CORS (keep open for now, restrict later)
+// ✅ CORS
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -48,7 +63,6 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-    // 🔥 IMPORTANT: use real domain instead of localhost
     const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT}`;
     const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
 
@@ -64,14 +78,23 @@ app.post('/api/session/register', async (req, res) => {
   try {
     const { uid, deviceName, location, sessionId } = req.body;
 
-    await db.collection('users').doc(uid).collection('sessions').doc(sessionId).set({
-      deviceName,
-      location,
-      loginAt: admin.firestore.FieldValue.serverTimestamp(),
-      sessionId
-    });
+    if (!uid || !sessionId) {
+      return res.status(400).json({ error: "Missing uid or sessionId" });
+    }
+
+    await db.collection('users')
+      .doc(uid)
+      .collection('sessions')
+      .doc(sessionId)
+      .set({
+        deviceName,
+        location,
+        loginAt: admin.firestore.FieldValue.serverTimestamp(),
+        sessionId
+      });
 
     res.json({ success: true });
+
   } catch (err) {
     console.error("Session Register Error:", err);
     res.status(500).json({ error: err.message });
@@ -83,9 +106,14 @@ app.post('/api/session/logout', async (req, res) => {
   try {
     const { uid, sessionId } = req.body;
 
-    await db.collection('users').doc(uid).collection('sessions').doc(sessionId).delete();
+    await db.collection('users')
+      .doc(uid)
+      .collection('sessions')
+      .doc(sessionId)
+      .delete();
 
     res.json({ success: true });
+
   } catch (err) {
     console.error("Logout Error:", err);
     res.status(500).json({ error: err.message });
