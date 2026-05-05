@@ -12,6 +12,10 @@ let serviceAccount;
 try {
   if (process.env.FIREBASE_KEY) {
     serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
+
+    // 🔥 THIS LINE WAS MISSING (CRITICAL FIX)
+    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+
   } else {
     throw new Error("FIREBASE_KEY not found in ENV");
   }
