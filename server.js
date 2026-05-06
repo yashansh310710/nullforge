@@ -1,26 +1,36 @@
 require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const admin = require('firebase-admin');
-const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
-const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
-// 🔐 Firebase Init (ENV based)
+const { 
+  S3Client, 
+  PutObjectCommand, 
+  GetObjectCommand 
+} = require("@aws-sdk/client-s3");
+
+const { 
+  getSignedUrl 
+} = require("@aws-sdk/s3-request-presigner");
+
+// ==========================================
+// 🔐 FIREBASE INIT
+// ==========================================
+
 let serviceAccount;
 
 try {
-  if (process.env.FIREBASE_KEY) {
-    serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
-
-    // 🔥 THIS LINE WAS MISSING (CRITICAL FIX)
-    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-
-  } else {
-    throw new Error("FIREBASE_KEY not found in ENV");
+  if (!process.env.FIREBASE_KEY) {
+    throw new Error("FIREBASE_KEY not found");
   }
+
+  serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
+
+  // 🔥 FIX PRIVATE KEY
+  serviceAccount.private_key =
+    serviceAccount.private_key.replace(/\\n/g, '\n');
 
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
@@ -29,14 +39,17 @@ try {
   console.log("✅ Firebase initialized successfully");
 
 } catch (err) {
-  console.error("❌ Firebase Init Error:", err.message);
+  console.error("❌ Firebase Init Error:", err);
 }
 
 const db = admin.firestore();
 
+// ==========================================
+// 🚀 EXPRESS APP
+// ==========================================
+
 const app = express();
 
-// ✅ CORS
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -44,6 +57,10 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
+// ==========================================
+// ☁️ BACKBLAZE B2 CONFIG
+// ==========================================
 
 const s3 = new S3Client({
   endpoint: process.env.B2_ENDPOINT,
@@ -53,45 +70,58 @@ const s3 = new S3Client({
     secretAccessKey: process.env.B2_APPLICATION_KEY
   }
 });
-// ✅ Ensure uploads folder exists
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
 
-// ✅ Static serving:removed
+// ==========================================
+// 📦 MULTER MEMORY STORAGE
+// ==========================================
 
-// 📦 Multer config
 const upload = multer({
-  storage: multer.memoryStorage()
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
+  }
 });
 
-// 📤 Upload route
+// ==========================================
+// 📤 FILE UPLOAD ROUTE
+// ==========================================
+
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
+
     if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
+      return res.status(400).json({
+        error: 'No file uploaded'
+      });
     }
 
-    const fileName = `${Date.now()}-${req.file.originalname}`;
+    const cleanName = req.file.originalname.replace(/\s+/g, '_');
 
-    const command = new PutObjectCommand({
+    const fileName =
+      `${Date.now()}-${cleanName}`;
+
+    const uploadCommand = new PutObjectCommand({
       Bucket: process.env.B2_BUCKET_NAME,
       Key: fileName,
       Body: req.file.buffer,
       ContentType: req.file.mimetype
     });
 
-    await s3.send(command);
+    await s3.send(uploadCommand);
 
+    // 🔥 TEMP SIGNED URL
     const getCommand = new GetObjectCommand({
       Bucket: process.env.B2_BUCKET_NAME,
       Key: fileName
     });
 
-    const signedUrl = await getSignedUrl(s3, getCommand, {
-      expiresIn: 60 * 60 * 24 * 7
-    });
+    const signedUrl = await getSignedUrl(
+      s3,
+      getCommand,
+      {
+        expiresIn: 60 * 60 * 24 * 7 // 7 days
+      }
+    );
 
     res.json({
       success: true,
@@ -99,64 +129,117 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     });
 
   } catch (err) {
-    console.error("B2 Upload Error:", err);
-    res.status(500).json({ error: 'Upload failed' });
+
+    console.error("❌ B2 Upload Error:", err);
+
+    res.status(500).json({
+      error: 'Upload failed'
+    });
   }
 });
 
-// 📲 Session Register
+// ==========================================
+// 📲 SESSION REGISTER
+// ==========================================
+
 app.post('/api/session/register', async (req, res) => {
+
   try {
-    const { uid, deviceName, location, sessionId } = req.body;
+
+    const {
+      uid,
+      deviceName,
+      location,
+      sessionId
+    } = req.body;
 
     if (!uid || !sessionId) {
-      return res.status(400).json({ error: "Missing uid or sessionId" });
+      return res.status(400).json({
+        error: "Missing uid or sessionId"
+      });
     }
 
-    await db.collection('users')
+    await db
+      .collection('users')
       .doc(uid)
       .collection('sessions')
       .doc(sessionId)
       .set({
         deviceName,
         location,
-        loginAt: admin.firestore.FieldValue.serverTimestamp(),
-        sessionId
+        sessionId,
+        loginAt:
+          admin.firestore.FieldValue.serverTimestamp()
       });
 
-    res.json({ success: true });
+    res.json({
+      success: true
+    });
 
   } catch (err) {
-    console.error("Session Register Error:", err);
-    res.status(500).json({ error: err.message });
+
+    console.error("❌ Session Register Error:", err);
+
+    res.status(500).json({
+      error: err.message
+    });
   }
 });
 
-// 🚪 Logout
-app.post('/api/session/logout', async (req, res) => {
-  try {
-    const { uid, sessionId } = req.body;
+// ==========================================
+// 🚪 SESSION LOGOUT
+// ==========================================
 
-    await db.collection('users')
+app.post('/api/session/logout', async (req, res) => {
+
+  try {
+
+    const {
+      uid,
+      sessionId
+    } = req.body;
+
+    if (!uid || !sessionId) {
+      return res.status(400).json({
+        error: "Missing uid or sessionId"
+      });
+    }
+
+    await db
+      .collection('users')
       .doc(uid)
       .collection('sessions')
       .doc(sessionId)
       .delete();
 
-    res.json({ success: true });
+    res.json({
+      success: true
+    });
 
   } catch (err) {
-    console.error("Logout Error:", err);
-    res.status(500).json({ error: err.message });
+
+    console.error("❌ Logout Error:", err);
+
+    res.status(500).json({
+      error: err.message
+    });
   }
 });
 
-// 🏠 Health check
+// ==========================================
+// 🏠 HEALTH CHECK
+// ==========================================
+
 app.get('/', (req, res) => {
   res.send('Nullforge Backend is Live 🚀');
 });
 
+// ==========================================
+// 🚀 START SERVER
+// ==========================================
+
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
