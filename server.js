@@ -5,6 +5,8 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const admin = require('firebase-admin');
+const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 // 🔐 Firebase Init (ENV based)
 let serviceAccount;
@@ -43,36 +45,61 @@ app.use(cors({
 
 app.use(express.json());
 
+const s3 = new S3Client({
+  endpoint: process.env.B2_ENDPOINT,
+  region: "us-east-005",
+  credentials: {
+    accessKeyId: process.env.B2_KEY_ID,
+    secretAccessKey: process.env.B2_APPLICATION_KEY
+  }
+});
 // ✅ Ensure uploads folder exists
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
 }
 
-// ✅ Static serving
-app.use('/uploads', express.static(uploadDir));
+// ✅ Static serving:removed
 
 // 📦 Multer config
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname);
-    cb(null, uniqueName);
-  }
+const upload = multer({
+  storage: multer.memoryStorage()
 });
-const upload = multer({ storage });
 
 // 📤 Upload route
-app.post('/api/upload', upload.single('file'), (req, res) => {
+app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
 
-    const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT}`;
-    const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
+    const fileName = `${Date.now()}-${req.file.originalname}`;
 
-    res.json({ success: true, url: fileUrl });
+    const command = new PutObjectCommand({
+      Bucket: process.env.B2_BUCKET_NAME,
+      Key: fileName,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype
+    });
+
+    await s3.send(command);
+
+    const getCommand = new GetObjectCommand({
+      Bucket: process.env.B2_BUCKET_NAME,
+      Key: fileName
+    });
+
+    const signedUrl = await getSignedUrl(s3, getCommand, {
+      expiresIn: 60 * 60 * 24 * 7
+    });
+
+    res.json({
+      success: true,
+      url: signedUrl
+    });
+
   } catch (err) {
-    console.error("Upload error:", err);
+    console.error("B2 Upload Error:", err);
     res.status(500).json({ error: 'Upload failed' });
   }
 });
